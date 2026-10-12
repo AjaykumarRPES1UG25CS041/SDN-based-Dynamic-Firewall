@@ -85,8 +85,9 @@ class Firewall(app_manager.OSKenApp):
         super(Firewall, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.deny_rules = load_policy(POLICY_FILE)
-        # Events waiting to be sent to the logger (kept if the logger is down)
-        self.events = deque(maxlen=10000)
+        # Events waiting for the logger (kept if it is down). Not "events":
+        # the base class already uses self.events internally.
+        self.event_queue = deque(maxlen=10000)
         hub.spawn(self._logger_sender)
         self.logger.info("firewall started, %d deny rules loaded",
                          len(self.deny_rules))
@@ -220,13 +221,13 @@ class Firewall(app_manager.OSKenApp):
         line = json.dumps({"ts": time.time(), "source": "controller",
                            "event": event, "src_ip": src_ip,
                            "reason": reason, "detail": detail}) + "\n"
-        self.events.append(line.encode("utf-8"))
+        self.event_queue.append(line.encode("utf-8"))
 
     def _logger_sender(self):
         """Background green thread: send queued events to the logger."""
         sock = None
         while True:
-            if not self.events:
+            if not self.event_queue:
                 hub.sleep(0.2)
                 continue
             if sock is not None and peer_closed(sock):
@@ -241,15 +242,15 @@ class Firewall(app_manager.OSKenApp):
                 except OSError as e:
                     self.logger.warning(
                         "logger unreachable (%s), %d events queued",
-                        e, len(self.events))
+                        e, len(self.event_queue))
                     hub.sleep(RETRY_SECS)
                     continue
             try:
-                item = self.events[0]
+                item = self.event_queue[0]
                 sock.sendall(item)
                 # drop it from the queue only after it was sent
-                if self.events and self.events[0] is item:
-                    self.events.popleft()
+                if self.event_queue and self.event_queue[0] is item:
+                    self.event_queue.popleft()
             except OSError:
                 sock.close()
                 sock = None
