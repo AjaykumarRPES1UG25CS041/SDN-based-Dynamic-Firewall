@@ -1,0 +1,14 @@
+{
+  "deny": [
+    {
+      "proto": "tcp",
+      "dst_port": 23,
+      "reason": "telnet is not allowed"
+    },
+    {
+      "src": "10.0.0.3",
+      "dst": "10.0.0.6",
+      "reason": "h3 may not reach the logger"
+    }
+  ]
+}

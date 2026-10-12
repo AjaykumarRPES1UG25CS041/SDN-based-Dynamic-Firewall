@@ -103,8 +103,18 @@ def main():
         if args.bad_auth:
             return bad_auth_mode(args)
         return normal_mode(args)
+    except ConnectionRefusedError:
+        print("error: connection to %s:%d was refused (nothing is listening)"
+              % (args.host, args.port))
+        return 1
+    except socket.timeout:
+        print("error: no response from %s:%d within %.1f s "
+              "(host down, or packets are being dropped)"
+              % (args.host, args.port, args.timeout))
+        return 1
     except OSError as e:
-        print("error:", e)
+        print("error: connection to %s:%d failed: %s"
+              % (args.host, args.port, e))
         return 1
 
 
