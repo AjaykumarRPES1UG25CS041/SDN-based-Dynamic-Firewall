@@ -6,8 +6,13 @@ Decisions are made per connection:
   - IPv4 that matches a deny rule in policy.json -> drop rule (priority 50)
   - other allowed IPv4 -> forwarding rule for that connection (priority 1)
   - ARP and non-IP frames are only forwarded with packet-out, no rule
-Every ALLOW / DENY decision is queued and sent to the logger over TCP.
+A source is blocked (drop rule, priority 100, expires by itself) when it
+opens too many new connections, or when the app server reports repeated
+failed logins on port 7000. When the rule expires the switch tells us and
+we log UNBLOCK.
+Every decision is queued and sent to the logger over TCP.
 """
+import ipaddress
 import json
 import os
 import select
@@ -34,10 +39,21 @@ POLICY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy.j
 PRIO_MISS = 0
 PRIO_FORWARD = 1
 PRIO_DENY = 50
+PRIO_BLOCK = 100
 
 FORWARD_IDLE = 10    # seconds without traffic before a connection rule expires
 DENY_IDLE = 60       # same for drop rules
 RETRY_SECS = 2       # wait between attempts to reach the logger
+
+# Dynamic blocking
+FLOOD_LIMIT = 20     # block a source with more than this many new connections...
+FLOOD_WINDOW = 5     # ...within this many seconds
+BLOCK_SECS = 30      # hard_timeout of a block rule
+REPORT_PORT = 7000   # app server sends AUTH_FAIL reports here
+# Only these addresses may send reports (the app server; loopback/root for tests)
+REPORTERS = {"10.0.0.5", "10.0.0.254", "127.0.0.1"}
+# Never block the controller side or the logger
+NEVER_BLOCK = {CONTROLLER_IP, LOGGER_HOST}
 
 PROTOS = {"tcp": in_proto.IPPROTO_TCP, "icmp": in_proto.IPPROTO_ICMP,
           "udp": in_proto.IPPROTO_UDP}
@@ -88,14 +104,18 @@ class Firewall(app_manager.OSKenApp):
         # Events waiting for the logger (kept if it is down). Not "events":
         # the base class already uses self.events internally.
         self.event_queue = deque(maxlen=10000)
+        self.datapaths = {}     # dpid -> datapath, needed to block from reports
+        self.blocked = set()    # IPs that currently have a block rule
+        self.syn_times = {}     # src IP -> recent new-connection timestamps
         hub.spawn(self._logger_sender)
+        hub.spawn(self._report_server)
         self.logger.info("firewall started, %d deny rules loaded",
                          len(self.deny_rules))
 
     # ---------- flow helpers ----------
 
     def add_flow(self, datapath, priority, match, actions,
-                 idle_timeout=0):
+                 idle_timeout=0, hard_timeout=0, flags=0):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
         # An empty instruction list means "drop"
@@ -105,7 +125,8 @@ class Firewall(app_manager.OSKenApp):
                 ofproto.OFPIT_APPLY_ACTIONS, actions)]
         datapath.send_msg(parser.OFPFlowMod(
             datapath=datapath, priority=priority, match=match,
-            instructions=instructions, idle_timeout=idle_timeout))
+            instructions=instructions, idle_timeout=idle_timeout,
+            hard_timeout=hard_timeout, flags=flags))
 
     def packet_out(self, msg, in_port, out_port):
         datapath = msg.datapath
@@ -124,6 +145,7 @@ class Firewall(app_manager.OSKenApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        self.datapaths[datapath.id] = datapath
 
         # Remove rules left over from an earlier run
         datapath.send_msg(parser.OFPFlowMod(
@@ -162,9 +184,21 @@ class Firewall(app_manager.OSKenApp):
             self.packet_out(msg, in_port, out_port)
             return
 
+        # A blocked source may still get a packet in before the rule is active
+        if ip.src in self.blocked:
+            return
+
         segment = pkt.get_protocol(tcp.tcp)
         sport = segment.src_port if segment else None
         dport = segment.dst_port if segment else None
+        new_conn = bool(segment and segment.bits & tcp.TCP_SYN
+                        and not segment.bits & tcp.TCP_ACK)
+
+        # 0. Flood detection: count new connections per source
+        if new_conn:
+            self.count_new_connection(ip.src)
+            if ip.src in self.blocked:
+                return   # this connection pushed it over the limit
 
         # 1. Static deny rules
         for rule in self.deny_rules:
@@ -185,8 +219,7 @@ class Firewall(app_manager.OSKenApp):
         self.packet_out(msg, in_port, out_port)
 
         # Log ALLOW once per connection: only for the first SYN
-        if segment and segment.bits & tcp.TCP_SYN and \
-                not segment.bits & tcp.TCP_ACK:
+        if new_conn:
             what = "tcp %s:%d -> %s:%d" % (ip.src, sport, ip.dst, dport)
             self.logger.info("ALLOW %s", what)
             if ip.src != CONTROLLER_IP:   # skip our own logger connection
@@ -213,6 +246,108 @@ class Firewall(app_manager.OSKenApp):
                                            ip.dst, segment.dst_port)
         self.logger.info("DENY %s (%s)", what, rule.get("reason", ""))
         self.emit("DENY", ip.src, rule.get("reason", "policy"), what)
+
+    # ---------- dynamic blocking ----------
+
+    def count_new_connection(self, src):
+        """Remember this SYN; block the source if it opens too many."""
+        now = time.time()
+        times = self.syn_times.setdefault(src, deque())
+        times.append(now)
+        while times and times[0] < now - FLOOD_WINDOW:
+            times.popleft()
+        if len(times) > FLOOD_LIMIT:
+            self.block(src, "connection_flood",
+                       "%d conns in %ds" % (len(times), FLOOD_WINDOW))
+
+    def block(self, src, reason, detail):
+        """Install a drop rule for a source IP that expires on its own."""
+        if src in NEVER_BLOCK or src in self.blocked:
+            return
+        self.blocked.add(src)
+        for datapath in self.datapaths.values():
+            parser = datapath.ofproto_parser
+            match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,
+                                    ipv4_src=src)
+            # SEND_FLOW_REM: the switch tells us when the rule is removed
+            self.add_flow(datapath, PRIO_BLOCK, match, None,
+                          hard_timeout=BLOCK_SECS,
+                          flags=datapath.ofproto.OFPFF_SEND_FLOW_REM)
+        self.logger.info("BLOCK %s for %ds (%s: %s)", src, BLOCK_SECS,
+                         reason, detail)
+        self.emit("BLOCK", src, reason, detail)
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def flow_removed_handler(self, ev):
+        """A block rule expired: allow the source again."""
+        msg = ev.msg
+        if msg.priority != PRIO_BLOCK:
+            return
+        src = msg.match.get("ipv4_src")
+        if src is None:
+            return
+        self.blocked.discard(src)
+        self.syn_times.pop(src, None)   # start counting from zero
+        self.logger.info("UNBLOCK %s", src)
+        self.emit("UNBLOCK", src, "block_expired",
+                  "block rule removed after %ds" % msg.duration_sec)
+
+    # ---------- report listener (app server -> controller) ----------
+
+    def _report_server(self):
+        """Background green thread: accept AUTH_FAIL reports on REPORT_PORT."""
+        try:
+            server = hub.StreamServer(("0.0.0.0", REPORT_PORT),
+                                      self._handle_reporter)
+        except OSError as e:
+            self.logger.error("cannot listen on port %d: %s", REPORT_PORT, e)
+            return
+        self.logger.info("listening for reports on port %d", REPORT_PORT)
+        server.serve_forever()
+
+    def _handle_reporter(self, sock, addr):
+        """Read newline-delimited JSON reports from one connection."""
+        if addr[0] not in REPORTERS:
+            self.logger.warning("ignoring report connection from %s", addr[0])
+            sock.close()
+            return
+        buf = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break   # reporter disconnected
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    self._handle_report(line)
+                if len(buf) > 65536:
+                    self.logger.warning("report line too long, closing")
+                    break
+        except OSError as e:
+            self.logger.warning("report connection error: %s", e)
+        finally:
+            sock.close()
+
+    def _handle_report(self, line):
+        line = line.strip()
+        if not line:
+            return
+        try:
+            report = json.loads(line.decode("utf-8", "replace"))
+            src = str(ipaddress.ip_address(report["src_ip"]))
+            kind = report["event"]
+        except (ValueError, KeyError, TypeError):
+            self.logger.warning("ignoring malformed report: %r", line[:80])
+            return
+        if kind != "AUTH_FAIL":
+            self.logger.warning("ignoring report with event %r", kind)
+            return
+        count = report.get("count", "?")
+        self.logger.info("report: AUTH_FAIL from %s (count=%s)", src, count)
+        self.emit("AUTH_FAIL", src, "failed_logins",
+                  "%s failed logins reported by app server" % count)
+        self.block(src, "brute_force", "%s failed logins" % count)
 
     # ---------- event logging (never blocks packet-in) ----------
 
