@@ -7,7 +7,8 @@ Line protocol (one command per line):
     QUIT                ->  connection is closed
 
 Failed logins are counted per client IP. Once an IP has more than
-MAX_FAILS failures, an AUTH_FAIL report is sent to the controller.
+MAX_FAILS failures, an AUTH_FAIL report is sent to the controller and the
+count for that IP starts again from zero.
 """
 import argparse
 import json
@@ -73,6 +74,9 @@ def handle_client(conn, addr, args):
                         with fail_lock:
                             fail_counts[ip] = fail_counts.get(ip, 0) + 1
                             count = fail_counts[ip]
+                            if count > MAX_FAILS:
+                                # Reported now, so start counting again from 0
+                                del fail_counts[ip]
                         log("%s AUTH %s failed (%d failures from %s)"
                             % (tag, user, count, ip))
                         conn.sendall(b"ERR bad_credentials\n")
