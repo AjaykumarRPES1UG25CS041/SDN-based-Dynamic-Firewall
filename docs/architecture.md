@@ -128,3 +128,62 @@ forwarding.
 5. **Logger crash and reconnect**: stop the logger on h6 during traffic; the
    controller keeps enforcing rules, buffers events, reconnects and delivers
    them when the logger returns.
+
+## 9. Performance Evaluation
+
+**Question.** How well does the dynamic firewall protect a normal client
+(h1) from a connection flood (h4), compared with having no firewall and with
+a static policy only, and how quickly does it react?
+
+**Setups** (the controller that is running):
+
+| Label         | Controller                                   | Behaviour |
+|---------------|----------------------------------------------|-----------|
+| `no_firewall` | `controller/learning_switch.py`              | Plain forwarding, no policy, no blocking |
+| `static`      | `controller/firewall.py` with `FW_DYNAMIC=0` | Static deny rules and per-connection rules, no flood or login blocking |
+| `dynamic`     | `controller/firewall.py`                     | Static rules plus dynamic blocking |
+
+**Conditions.** Every setup is run at two link delays: 0 ms (no shaping) and
+20 ms. The delay is applied to every link interface, so a packet between h1
+and h5 crosses two shaped interfaces in each direction and the round trip is
+about four times the configured value (about 80 ms at 20 ms).
+
+**Workload** (`experiments/run_experiment.py`):
+
+1. *Baseline:* h1 runs a normal client session of 30 messages to h5 and an
+   iperf TCP test to h5 for 5 s.
+2. *Under attack:* h4 starts a connection flood against h5 (300 new TCP
+   connections). While it runs, h1 repeats the same two measurements.
+
+**Metrics** (one row per run in `results/results.csv`):
+
+| Column | Meaning |
+|--------|---------|
+| `baseline_rtt_ms`, `attack_rtt_ms` | h1 average round-trip time per message, without and with the attack |
+| `baseline_mbps`, `attack_mbps` | h1 iperf throughput to h5, without and with the attack |
+| `attack_conns_succeeded` | Attack connections that completed the TCP handshake (out of 300) |
+| `block_response_ms` | Time from the start of the attack to the controller's first BLOCK event for 10.0.0.4 (empty when nothing blocks) |
+
+**Procedure.** Start the controller for the setup, then run
+`sudo python3 experiments/run_experiment.py --label <label> --delay <delay>`.
+Charts are produced with `python experiments/plot_results.py`. Exact commands
+are in `experiments/README.md`.
+
+**Expected outcome.** The dynamic firewall should let through only about 20
+attack connections (its limit is 20 new connections in 5 s) while the other
+two setups let all 300 through, and it should block within a fraction of a
+second. The effect on h1's RTT and throughput is expected to be largest for
+the setups that do not block; how large it is in this VM is to be measured.
+
+**Results.**
+
+| Setup | Delay | h1 RTT base / attack (ms) | h1 Mbit/s base / attack | Attack conns succeeded | Block response (ms) |
+|-------|-------|---------------------------|-------------------------|------------------------|---------------------|
+| no_firewall | 0 ms  | _TBD_ | _TBD_ | _TBD_ | n/a |
+| static      | 0 ms  | _TBD_ | _TBD_ | _TBD_ | n/a |
+| dynamic     | 0 ms  | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| no_firewall | 20 ms | _TBD_ | _TBD_ | _TBD_ | n/a |
+| static      | 20 ms | _TBD_ | _TBD_ | _TBD_ | n/a |
+| dynamic     | 20 ms | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+_Discussion of the results to be added after the runs._

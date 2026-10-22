@@ -1,6 +1,8 @@
 """Dynamic firewall controller (OS-Ken, OpenFlow 1.3).
 
 Run in the VM with:  osken-manager --verbose controller/firewall.py
+Static policy only (no flood or AUTH_FAIL blocking, used as a baseline in
+the experiments):  FW_DYNAMIC=0 osken-manager controller/firewall.py
 
 Decisions are made per connection:
   - IPv4 that matches a deny rule in policy.json -> drop rule (priority 50)
@@ -45,7 +47,8 @@ FORWARD_IDLE = 10    # seconds without traffic before a connection rule expires
 DENY_IDLE = 60       # same for drop rules
 RETRY_SECS = 2       # wait between attempts to reach the logger
 
-# Dynamic blocking
+# Dynamic blocking (set FW_DYNAMIC=0 in the environment to turn it off)
+DYNAMIC = os.environ.get("FW_DYNAMIC", "1") != "0"
 FLOOD_LIMIT = 20     # block a source with more than this many new connections...
 FLOOD_WINDOW = 5     # ...within this many seconds
 BLOCK_SECS = 30      # hard_timeout of a block rule
@@ -109,8 +112,10 @@ class Firewall(app_manager.OSKenApp):
         self.syn_times = {}     # src IP -> recent new-connection timestamps
         hub.spawn(self._logger_sender)
         hub.spawn(self._report_server)
-        self.logger.info("firewall started, %d deny rules loaded",
-                         len(self.deny_rules))
+        self.logger.info("firewall started, %d deny rules loaded, mode: %s",
+                         len(self.deny_rules),
+                         "dynamic (static policy + blocking)" if DYNAMIC
+                         else "static policy only")
 
     # ---------- flow helpers ----------
 
@@ -146,6 +151,10 @@ class Firewall(app_manager.OSKenApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         self.datapaths[datapath.id] = datapath
+        # The switch starts with an empty table, so forget old state
+        self.mac_to_port.pop(datapath.id, None)
+        self.blocked.clear()
+        self.syn_times.clear()
 
         # Remove rules left over from an earlier run
         datapath.send_msg(parser.OFPFlowMod(
@@ -195,7 +204,7 @@ class Firewall(app_manager.OSKenApp):
                         and not segment.bits & tcp.TCP_ACK)
 
         # 0. Flood detection: count new connections per source
-        if new_conn:
+        if new_conn and DYNAMIC:
             self.count_new_connection(ip.src)
             if ip.src in self.blocked:
                 return   # this connection pushed it over the limit
@@ -347,7 +356,8 @@ class Firewall(app_manager.OSKenApp):
         self.logger.info("report: AUTH_FAIL from %s (count=%s)", src, count)
         self.emit("AUTH_FAIL", src, "failed_logins",
                   "%s failed logins reported by app server" % count)
-        self.block(src, "brute_force", "%s failed logins" % count)
+        if DYNAMIC:
+            self.block(src, "brute_force", "%s failed logins" % count)
 
     # ---------- event logging (never blocks packet-in) ----------
 
