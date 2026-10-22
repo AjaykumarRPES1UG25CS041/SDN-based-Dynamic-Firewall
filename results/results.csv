@@ -2,5 +2,6 @@ label,delay,baseline_rtt_ms,attack_rtt_ms,baseline_mbps,attack_mbps,attack_conns
 no_firewall,0ms,0.468,0.098,29708.0,28188.0,298,
 no_firewall,20ms,83.852,83.787,411.0,397.0,300,
 static,0ms,0.526,0.927,25205.0,21263.0,300,
-no_firewall,0ms,1.558,60.06,5296.0,6307.0,297,
-no_firewall,20ms,87.793,89.438,593.0,54.1,275,
+static,20ms,88.594,87.47,850.0,642.0,300,
+dynamic,0ms,1.847,6.946,6360.0,7295.0,60,953.7
+dynamic,20ms,88.805,86.102,702.0,575.0,60,2502.7
