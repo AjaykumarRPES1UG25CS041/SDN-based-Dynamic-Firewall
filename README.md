@@ -1,438 +1,300 @@
-# Dynamic Firewall with Security Event Logger
+# SDN-based Dynamic Firewall with a Security Event Logger
 
-A Computer Networks mini-project exploring socket programming,
-Software-Defined Networking (SDN), dynamic traffic filtering, and
-centralized security-event logging.
+A Computer Networks mini project. An OS-Ken (OpenFlow 1.3) controller watches
+the traffic of a small TCP application running in Mininet and decides, per
+connection, whether to allow or deny it. It blocks a source automatically
+when it floods the network with connections or keeps failing to log in, and
+lifts the block by itself 30 seconds later. Every decision is sent to a
+central TCP logger.
 
-> **Current status:** The development environment and basic SDN
-> forwarding test have been verified. The complete TCP application,
-> security logger, dynamic firewall, recovery logic, and performance
-> experiments are still to be implemented.
+## Topology
 
-## 1. Project overview
+```
+                      VM root namespace
+              +--------------------------------+
+              |  OS-Ken controller (firewall)  |
+              |  10.0.0.254/24                 |
+              +---------------+----------------+
+                              | extra link
+   h1 10.0.0.1 client --+     |
+   h2 10.0.0.2 client --+     |
+   h3 10.0.0.3 client --+--- [ s1 ] Open vSwitch, OpenFlow 1.3
+   h4 10.0.0.4 attacker +
+   h5 10.0.0.5 app server (TCP 5000)
+   h6 10.0.0.6 logger     (TCP 6000)
 
-The project aims to demonstrate how an SDN controller can dynamically
-manage network traffic while a socket-based application communicates
-across hosts and security events are recorded.
+   Ports: 5000 app, 6000 logger, 7000 app server -> controller reports,
+          6653 OpenFlow (switch <-> controller)
+```
 
-The planned project will include these functional areas:
+## Components
 
--   TCP client/server communication using Python sockets.
--   Traffic classification using information such as source,
-    destination, and port.
--   An SDN controller that communicates with Open vSwitch over OpenFlow.
--   Dynamic blocking of selected traffic and subsequent
-    recovery/unblocking.
--   Centralized logging of relevant security events.
--   Multiple-client testing.
--   Experiments measuring blocking response time and network impact.
--   Documentation and a repeatable demonstration.
+| File | What it does |
+|------|--------------|
+| `controller/firewall.py` | The firewall: static policy, per-connection rules, flood and brute-force blocking, event queue to the logger |
+| `controller/policy.json` | Static deny rules (any TCP port 23; 10.0.0.3 to 10.0.0.6) |
+| `controller/learning_switch.py` | Plain learning switch, used as the "no firewall" baseline |
+| `controller/requirements.txt` | Python packages for the controller's virtual environment (OS-Ken 3.1.1) |
+| `app/app_server.py` | TCP app server (AUTH / MSG / QUIT); counts failed logins and reports them to the controller |
+| `app/client.py` | Client: normal session, `--bad-auth` (brute force), `--attack` (connection flood) |
+| `logger/logger_server.py` | Receives JSON events over TCP, prints them and appends them to a file |
+| `topology/topology.py` | Mininet topology (s1, h1-h6, root link); starts the logger and app server |
+| `topology/ns_test.py` | Small topology used to test the root-namespace link |
+| `experiments/run_experiment.py` | Runs one performance experiment and appends a row to `results/results.csv` |
+| `experiments/plot_results.py` | Draws the result charts from the CSV |
+| `demo.sh` | Starts the controller and the topology for the demo |
+| `docs/architecture.md` | Design, message formats, rule priorities, performance evaluation |
+| `docs/viva-notes.md` | Plain-language explanation of everything, for the viva |
+| `tests/README.md` | Test cases with the commands and observed results |
 
-The exact implementation and module boundaries will be refined during
-development.
+## Repo layout
 
-## 2. Tested environment
+```
+demo.sh                 start the controller and topology
+app/                    app server and client
+controller/             firewall, policy, baseline switch, requirements
+logger/                 security event logger
+topology/               Mininet topology scripts
+experiments/            experiment runner, plot script, instructions
+results/                results.csv and the charts
+tests/                  test cases (README.md)
+docs/                   architecture and viva notes
+```
 
-The following versions and configuration have been tested in the current
-development environment:
+## Setup on a fresh Ubuntu 22.04 VM
 
-  -----------------------------------------------------------------------
-  Component                           Tested configuration
-  ----------------------------------- -----------------------------------
-  Host operating system               Windows
+The project was developed and tested on Ubuntu 22.04.5, Python 3.10.12,
+Mininet 2.3.0, Open vSwitch 2.17.12 and OS-Ken 3.1.1 (OpenFlow 1.3).
 
-  Virtualization                      Oracle VirtualBox
+1. Install the system packages:
 
-  VM name                             `CN-Project-Ubuntu`
-
-  Guest operating system              Ubuntu 22.04.5 LTS Desktop
-
-  VM resources                        4 CPUs, approximately 6 GB RAM, 40
-                                      GB virtual disk
-
-  Python                              3.10.12
-
-  Git                                 2.34.1
-
-  Mininet                             2.3.0
-
-  Open vSwitch                        2.17.12
-
-  SDN controller library              OS-Ken 3.1.1, installed in a Python
-                                      virtual environment
-
-  Southbound protocol                 OpenFlow 1.3
-
-  Editor                              Visual Studio Code on Windows with
-                                      Remote - SSH
-  -----------------------------------------------------------------------
-
-The VM uses VirtualBox NAT networking. SSH port forwarding maps Windows
-`127.0.0.1:2222` to port `22` inside Ubuntu.
-
-These are the versions used for the successful test. Teammates should
-record their versions and test their own environment rather than
-assuming every system will behave identically.
-
-## 3. Prerequisites
-
-### Required software
-
-1.  **Oracle VirtualBox** --- runs the Ubuntu VM on a Windows host.
-2.  **Ubuntu 22.04 LTS** --- provides the Linux environment needed by
-    Mininet and Open vSwitch.
-3.  **Git** --- repository and version-control operations.
-4.  **Python 3, pip, and venv** --- Python development and isolated
-    dependencies.
-5.  **Mininet** --- creates virtual hosts, links, and network
-    topologies.
-6.  **Open vSwitch** --- provides the virtual switch used by Mininet.
-7.  **OS-Ken** --- SDN controller framework used in this environment.
-8.  **Visual Studio Code and Remote - SSH** --- optional but recommended
-    for editing and running code from Windows while it executes inside
-    Ubuntu.
-
-A Windows host with enough free disk space and memory is required to run
-the VM comfortably. The tested VM configuration used 4 CPUs, about 6 GB
-RAM, and a 40 GB virtual disk.
-
-## 4. Install the Ubuntu environment
-
-### 4.1 Create the VM
-
-In VirtualBox:
-
-1.  Create a VM named `CN-Project-Ubuntu`.
-2.  Install Ubuntu 22.04 LTS Desktop from an official Ubuntu image.
-3.  Allocate around 4 CPUs, 6 GB RAM, and a 40 GB virtual disk if your
-    computer can comfortably support these settings.
-4.  Configure the VM's network adapter to use **NAT**.
-5.  Start Ubuntu and complete its initial setup.
-
-These resource settings match the development VM; adjust them to suit
-the host computer if necessary.
-
-### 4.2 Update Ubuntu and install base packages
-
-Open a terminal inside Ubuntu and run:
-
-``` bash
+```bash
 sudo apt update
-sudo apt upgrade -y
-sudo apt install git mininet openvswitch-switch python3-pip python3-venv openssh-server build-essential libffi-dev libssl-dev libxml2-dev libxslt1-dev zlib1g-dev -y
+sudo apt install -y git mininet openvswitch-switch python3-venv python3-pip iperf
 ```
 
-Check the installed versions:
+If installing the Python packages in step 3 fails while building a package,
+also run
+`sudo apt install -y build-essential libffi-dev libssl-dev libxml2-dev libxslt1-dev zlib1g-dev`.
 
-``` bash
-python3 --version
-git --version
-mn --version
-ovs-vsctl --version
+2. Clone the repository:
+
+```bash
+git clone https://github.com/abhiramagaram-180/SDN-based-Dynamic-Firewall.git ~/sdn-dynamic-firewall
+cd ~/sdn-dynamic-firewall
 ```
 
-The current development VM reported Python 3.10.12, Git 2.34.1, Mininet
-2.3.0, and Open vSwitch 2.17.12.
+3. Create the OS-Ken virtual environment and install the controller
+   requirements:
 
-### 4.3 Install OS-Ken in an isolated virtual environment
-
-The original Ryu 4.34 installation encountered dependency compatibility
-errors in this environment. We therefore switched to OS-Ken and verified
-that it could run a controller and communicate with Mininet.
-
-Create and activate the virtual environment:
-
-``` bash
+```bash
 python3 -m venv ~/osken/venv
 source ~/osken/venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install "os-ken<4.0"
+python -m pip install -r controller/requirements.txt
+deactivate
 ```
 
-Verify that the controller command is available:
+4. Check the installation:
 
-``` bash
-which python
-osken-manager --help
+```bash
+python3 --version
+mn --version
+ovs-vsctl --version
+~/osken/venv/bin/osken-manager --help
 ```
 
-The Python path should point to:
+The Mininet and topology scripts run with the system Python (`sudo python3`)
+and never import OS-Ken. Only the controller runs inside the virtual
+environment.
 
-``` text
-/home/<your-ubuntu-username>/osken/venv/bin/python
-```
+## Quick start
 
-The tested environment used OS-Ken 3.1.1. The virtual environment must
-be activated in each new terminal where OS-Ken commands are run:
-
-``` bash
-source ~/osken/venv/bin/activate
-```
-
-Do not assume that activating a virtual environment in one terminal
-activates it in other terminal tabs.
-
-## 5. Connect Windows VS Code to Ubuntu using SSH
-
-This lets teammates edit files using VS Code on Windows while commands
-and project code run inside the Ubuntu VM.
-
-### 5.1 Enable SSH inside Ubuntu
-
-In an Ubuntu terminal:
-
-``` bash
-sudo systemctl enable --now ssh
-systemctl status ssh
-```
-
-The SSH service should show as active.
-
-### 5.2 Configure VirtualBox port forwarding
-
-With the VM powered on or off as supported by the VirtualBox settings
-UI, open the VM's **Settings → Network → Adapter 1 → Advanced → Port
-Forwarding**.
-
-Add a rule with these values:
-
-  Field        Value
-  ------------ -------------
-  Name         `SSH`
-  Protocol     `TCP`
-  Host IP      `127.0.0.1`
-  Host Port    `2222`
-  Guest IP     Leave blank
-  Guest Port   `22`
-
-Save the rule. The host port `2222` is used to avoid needing to expose
-SSH directly on the host's standard port.
-
-### 5.3 Test the connection from Windows
-
-Open PowerShell on Windows and run:
-
-``` powershell
-ssh -p 2222 <ubuntu-username>@127.0.0.1
-```
-
-Replace `<ubuntu-username>` with the username created in Ubuntu. For the
-original development VM, the username is `vboxuser`.
-
-The first connection may ask you to confirm the host key. Confirm it
-only if you expect to be connecting to your own VM, then enter the
-Ubuntu account password when prompted.
-
-### 5.4 Connect through VS Code
-
-1.  Install Visual Studio Code on Windows.
-
-2.  Install Microsoft's **Remote - SSH** extension.
-
-3.  Open the Command Palette (`Ctrl+Shift+P`).
-
-4.  Choose **Remote-SSH: Connect to Host...**.
-
-5.  Enter or select:
-
-    ``` text
-    ssh -p 2222 <ubuntu-username>@127.0.0.1
-    ```
-
-6.  Once connected, open the project folder inside Ubuntu:
-
-    ``` text
-    /home/<ubuntu-username>/sdn-dynamic-firewall
-    ```
-
-The VS Code status bar should indicate an SSH connection. Use a VS Code
-terminal in that remote window to run Linux commands.
-
-**Important:** The Ubuntu VM must be running, and the SSH service must
-be active, for Remote - SSH to connect. If the VM is shut down, start it
-before reconnecting.
-
-## 6. Create or open the project workspace
-
-Inside Ubuntu, create the workspace if it does not already exist:
-
-``` bash
-mkdir -p ~/sdn-dynamic-firewall
+```bash
 cd ~/sdn-dynamic-firewall
+chmod +x demo.sh
+./demo.sh
 ```
 
-If the team already has a GitHub repository, clone it into an
-appropriate location instead of creating a duplicate project directory.
-Follow the repository's existing README and branch conventions.
+`demo.sh` cleans up old Mininet state, starts the controller in the
+background (output in `/tmp/controller.out`), waits until it is listening, and
+opens the Mininet CLI. A list of demo commands is printed first. When you type
+`exit`, it stops the controller and cleans up again. If your virtual
+environment is somewhere else: `OSKEN_VENV=/path/to/venv ./demo.sh`.
 
-For the original development machine, the workspace is:
+Logs: `/tmp/controller.out` (controller), `/tmp/logger.out` and
+`/tmp/security_events.log` (logger), `/tmp/app_server.out` (app server).
 
-``` text
-/home/vboxuser/sdn-dynamic-firewall
+### Demo walkthrough
+
+Type these at the `mininet>` prompt, **one line at a time**.
+
+**0. Check that the switch has connected**
+
 ```
-
-## 7. Verify Mininet and Open vSwitch
-
-### 7.1 Basic Mininet check
-
-Run:
-
-``` bash
-sudo mn
+sh ovs-vsctl show
 ```
+Expect `is_connected: true` under the controller entry.
 
-At the `mininet>` prompt:
+**1. Normal session (allowed)**
 
-``` text
-nodes
-net
-pingall
-exit
 ```
+h1 python3 app/client.py --host 10.0.0.5
+```
+Expect `AUTH -> OK`, five `ECHO` replies with round-trip times and an
+average. The log gets an `ALLOW` event for 10.0.0.1 to 10.0.0.5:5000.
 
-This checks that Mininet can start a basic topology and that its hosts
-can communicate in the basic setup.
+**2. Telnet denied (static rule)**
 
-### 7.2 Test the SDN controller connection and forwarding
+```
+h1 python3 app/client.py --host 10.0.0.5 --port 23
+```
+Expect `error: no response from 10.0.0.5:23 within 3.0 s`. The packet is
+dropped, so the client times out instead of being refused. The log gets a
+`DENY` event ("telnet is not allowed").
 
-Activate the OS-Ken environment in one VS Code remote terminal:
+**3. h3 to h6 denied (static rule)**
 
-``` bash
+```
+h3 ping -c 3 -W 1 10.0.0.6
+```
+Expect 100% packet loss and a `DENY` event for 10.0.0.3.
+
+**4. Connection flood from h4 (dynamic block and recovery)**
+
+```
+h4 python3 app/client.py --host 10.0.0.5 --attack --count 25 --timeout 0.2
+h4 ping -c 2 -W 1 10.0.0.5
+h1 python3 app/client.py --host 10.0.0.5
+sh ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=100
+```
+Expect about 20 connections to succeed and the rest to fail; h4's ping gets
+100% loss; h1's session still works; and a rule like
+`priority=100,ip,nw_src=10.0.0.4 actions=drop` with `hard_timeout=30`. The
+controller console prints `BLOCK 10.0.0.4 ...`. After about 30 seconds:
+
+```
+sh ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=100
+sh grep BLOCK /tmp/security_events.log
+h4 ping -c 2 10.0.0.5
+```
+Expect no priority 100 rule, a `BLOCK` and an `UNBLOCK` event for 10.0.0.4, and
+working pings again.
+
+**5. Brute-force login from h2**
+
+```
+h2 python3 app/client.py --host 10.0.0.5 --bad-auth --count 6
+sh cat /tmp/app_server.out
+sh grep -E "AUTH_FAIL|BLOCK" /tmp/security_events.log
+```
+Expect `ERR bad_credentials` for the first attempts (the client may then print
+`no response`, because h2 is blocked). The app server output shows `reported
+AUTH_FAIL for 10.0.0.2 (count=4) to controller`, and the log shows `AUTH_FAIL`
+followed by `BLOCK` (reason `brute_force`). After about 30 seconds an
+`UNBLOCK` follows.
+
+**6. Logger crash and recovery**
+
+```
+sh pkill -f logger_server.py
+h1 python3 app/client.py --host 10.0.0.5
+```
+The session works. The controller console prints `logger unreachable ...
+events queued` every 2 seconds. Restart the logger:
+
+```
+h6 python3 -u logger/logger_server.py --logfile /tmp/security_events.log > /tmp/logger.out 2>&1 &
+sh cat /tmp/security_events.log
+```
+The queued `ALLOW` event appears; its `recv_ts` is later than its `ts` by about
+the time the logger was down.
+
+**Look at the rules and the log at any time**
+
+```
+sh ovs-ofctl -O OpenFlow13 dump-flows s1
+sh cat /tmp/security_events.log
+```
+Priority 0 sends unknown packets to the controller, priority 1 are allowed
+connections (they expire after 10 s idle), priority 50 are static deny rules
+and priority 100 are dynamic blocks.
+
+## Manual run (two terminals)
+
+Use this to watch the controller output live.
+
+Terminal 1, controller:
+
+```bash
 source ~/osken/venv/bin/activate
 cd ~/sdn-dynamic-firewall
-osken-manager --verbose ./controller/learning_switch.py
+osken-manager --verbose controller/firewall.py
 ```
 
-Keep this terminal open while the controller runs.
+Wait for `listening for reports on port 7000`. Terminal 2, topology:
 
-In a **second** remote terminal, start a two-host Mininet topology:
-
-``` bash
-sudo mn --topo single,2 --controller remote,ip=127.0.0.1,port=6653 --switch ovsk,protocols=OpenFlow13
+```bash
+cd ~/sdn-dynamic-firewall
+sudo mn -c
+sudo python3 topology/topology.py
 ```
 
-At the `mininet>` prompt, run:
+Terminal 1 prints `switch connected, dpid=1`. Use the walkthrough above at the
+`mininet>` prompt. To finish, type `exit` in Mininet and press Ctrl+C in
+Terminal 1. Always start the controller before the topology.
 
-``` text
-pingall
-```
+Optional: `FW_DYNAMIC=0 osken-manager controller/firewall.py` runs the static
+policy only (no flood or login blocking).
 
-In the tested environment, the learning-switch controller and Mininet
-reported:
+## Performance experiments
 
-``` text
-*** Results: 0% dropped (2/2 received)
-```
+`experiments/run_experiment.py` measures how a connection flood from h4 affects
+h1 for three setups (no firewall, static policy, dynamic firewall) at two link
+delays. The exact commands for all six runs and the plot command are in
+[experiments/README.md](experiments/README.md).
 
-This is a basic SDN connectivity test. It does **not** verify the
-dynamic firewall, TCP application, event logger, or automatic recovery
-functionality.
+Summary of the results (details and charts in
+[section 9 of docs/architecture.md](docs/architecture.md#9-performance-evaluation)):
 
-To stop the test, type `exit` in Mininet, then press `Ctrl+C` in the
-controller terminal.
+- The dynamic firewall stopped about 80% of the flood: 60 of 300 attack
+  connections got through, against 298 to 300 with no firewall or a static
+  policy.
+- The controller blocked the attacker after 953.7 ms (0 ms link delay) and
+  2502.7 ms (20 ms), mostly the time the attacker needs to reach the
+  threshold of 21 connections.
+- h1's RTT and throughput showed no clear difference between setups (within
+  the noise of a VM), because established connections do not pass through the
+  controller again.
 
-If `controller/learning_switch.py` is not present in the repository, this test
-cannot be run until the file is obtained from the development version or
-recreated. Do not treat this temporary test controller as the final
-firewall controller.
+## Troubleshooting
 
-## 8. Planned implementation areas
+- **Leftovers from an earlier run** (errors about existing interfaces,
+  switches or ports): run `sudo mn -c`, then start again.
+- **`File exists` for `root-eth0`:** an old root-namespace link is still
+  there. Run `sudo mn -c`; if it remains, `sudo ip link del root-eth0`.
+- **Controller not connected** (`sh ovs-vsctl show` has no
+  `is_connected: true`, the flow table is empty, pings fail, hosts say
+  "Destination Host Unreachable"): the controller is not running or not
+  listening on 6653. Start it first (`./demo.sh` does this) and look at
+  `/tmp/controller.out` or Terminal 1. The switch reconnects by itself within a
+  few seconds.
+- **Port already in use** (6653, 6000, 5000 or 7000): a previous controller or
+  server is still running. Run `sudo mn -c` and `pkill -f osken-manager`.
+- **Mininet CLI problems with pasted text:** paste commands one line at a
+  time and wait for the prompt. Several lines at once can be merged or lost.
+- **Warnings when the controller starts:** `EventletDeprecationWarning` and
+  `1 RLock(s) were not greened` come from the OS-Ken/eventlet libraries and
+  are harmless.
+- **Nothing in the log:** check `sh cat /tmp/logger.out` and that the
+  controller console shows `connected to logger 10.0.0.6:6000`. Events are
+  queued while the logger is down.
 
-The project requirements call for these broad areas of work:
+## More documentation
 
-1.  **TCP communication:** clients and a server exchange messages over
-    sockets.
-2.  **Traffic classification:** identify relevant traffic using source,
-    destination, and port information.
-3.  **SDN control:** communicate with Open vSwitch using the controller
-    and OpenFlow.
-4.  **Dynamic firewall behavior:** block selected traffic and
-    demonstrate recovery or unblocking.
-5.  **Security-event logging:** centrally record relevant events and
-    firewall actions.
-6.  **Multi-client tests:** verify behavior with more than one client.
-7.  **Performance experiments:** measure blocking response time and
-    network impact using a documented, repeatable method.
-8.  **Documentation and demonstration:** provide setup, usage, test
-    results, and material for the project demo and viva.
-
-The exact architecture, file layout, rule-management design, and
-integration sequence are development decisions to be finalized by the
-team.
-
-## 9. Current progress and known limitations
-
-### Verified
-
--   Ubuntu VM is running.
--   Base packages are installed.
--   Mininet and Open vSwitch are installed.
--   OS-Ken is installed in an isolated Python environment.
--   SSH access from Windows to Ubuntu works.
--   VS Code Remote - SSH works.
--   A temporary OS-Ken learning-switch controller was tested with
-    Mininet using OpenFlow 1.3.
--   `pingall` passed with 0% packet loss in the basic two-host topology.
-
-### Still to implement or validate
-
--   TCP client/server application.
--   Centralized security-event logger.
--   Final SDN controller and firewall rules.
--   Dynamic blocking and recovery.
--   Multiple-client and end-to-end integration tests.
--   Performance measurements, result files, and final project
-    documentation.
-
-### Known compatibility note
-
-Ryu 4.34 was attempted but failed due to dependency compatibility
-problems in this environment. OS-Ken is the working alternative
-currently used. Keep controller dependencies isolated in the
-`~/osken/venv` environment, and test dependency/version changes before
-adopting them across the team.
-
-## 10. Safe shutdown and resuming work
-
-Before shutting down:
-
-1.  Save all edited files in VS Code.
-
-2.  Type `exit` in the Mininet terminal.
-
-3.  Press `Ctrl+C` in the controller terminal.
-
-4.  Shut down Ubuntu normally using its desktop power menu or:
-
-    ``` bash
-    sudo poweroff
-    ```
-
-5.  Wait for Ubuntu to shut down, then shut down Windows normally.
-
-The installed packages, virtual environment, VM settings, and saved
-project files remain on the VM's virtual disk. After restarting, start
-the VM and reconnect through VS Code Remote - SSH. You do not need to
-reinstall everything. You will need to restart Mininet and the
-controller when you want to run the tests again.
-
-## 11. Team setup checklist
-
--   [ ] Ubuntu 22.04 LTS VM installed and internet access working.
--   [ ] Git, Mininet, Open vSwitch, Python `pip`/`venv`, and required
-    build libraries installed.
--   [ ] OS-Ken installed in `~/osken/venv`.
--   [ ] Mininet basic test completed.
--   [ ] SSH service and VirtualBox port forwarding configured if using
-    Windows Remote - SSH.
--   [ ] VS Code Remote - SSH connection verified if using that workflow.
--   [ ] Basic OpenFlow 1.3 learning-switch test completed when
-    `controller/learning_switch.py` is available.
--   [ ] Actual project components and tests tracked separately from the
-    environment setup.
-
-------------------------------------------------------------------------
-
-**Reminder:** A successful environment test is not the same as a
-completed project. Keep the README updated as implementation, test
-coverage, and measured results evolve.
+- [docs/architecture.md](docs/architecture.md): design, messages, rule
+  priorities, performance evaluation
+- [docs/viva-notes.md](docs/viva-notes.md): concepts, walkthroughs, design
+  decisions, limitations and likely viva questions
+- [tests/README.md](tests/README.md): test cases and observed results
+- [experiments/README.md](experiments/README.md): how to run the experiments
