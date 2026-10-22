@@ -170,20 +170,72 @@ Charts are produced with `python experiments/plot_results.py`. Exact commands
 are in `experiments/README.md`.
 
 **Expected outcome.** The dynamic firewall should let through only about 20
-attack connections (its limit is 20 new connections in 5 s) while the other
-two setups let all 300 through, and it should block within a fraction of a
-second. The effect on h1's RTT and throughput is expected to be largest for
-the setups that do not block; how large it is in this VM is to be measured.
+attack connections per block period (its limit is 20 new connections in 5 s)
+while the other two setups let all 300 through. The effect on h1's RTT and
+throughput was expected to be largest for the setups that do not block; how
+large it is in this VM was to be measured.
 
-**Results.**
+**Results** (one run per row, from `results/results.csv`).
 
 | Setup | Delay | h1 RTT base / attack (ms) | h1 Mbit/s base / attack | Attack conns succeeded | Block response (ms) |
 |-------|-------|---------------------------|-------------------------|------------------------|---------------------|
-| no_firewall | 0 ms  | _TBD_ | _TBD_ | _TBD_ | n/a |
-| static      | 0 ms  | _TBD_ | _TBD_ | _TBD_ | n/a |
-| dynamic     | 0 ms  | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| no_firewall | 20 ms | _TBD_ | _TBD_ | _TBD_ | n/a |
-| static      | 20 ms | _TBD_ | _TBD_ | _TBD_ | n/a |
-| dynamic     | 20 ms | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| no_firewall | 0 ms  | 0.47 / 0.10   | 29708 / 28188 | 298 | n/a |
+| static      | 0 ms  | 0.53 / 0.93   | 25205 / 21263 | 300 | n/a |
+| dynamic     | 0 ms  | 1.85 / 6.95   | 6360 / 7295   | 60  | 953.7 |
+| no_firewall | 20 ms | 83.85 / 83.79 | 411 / 397     | 300 | n/a |
+| static      | 20 ms | 88.59 / 87.47 | 850 / 642     | 300 | n/a |
+| dynamic     | 20 ms | 88.81 / 86.10 | 702 / 575     | 60  | 2502.7 |
 
-_Discussion of the results to be added after the runs._
+![h1 RTT and throughput during the attack](../results/results_h1_under_attack.png)
+
+*Figure 1. h1's average round-trip time and iperf throughput while h4 floods
+h5, for each setup and delay (throughput axis is logarithmic).*
+
+![Attack connections that got through and blocking response time](../results/results_attack_and_block.png)
+
+*Figure 2. Attack connections that completed (out of 300) and the time the
+dynamic firewall needed to block h4.*
+
+**Analysis.**
+
+- **The flood was cut by about 80%.** With no firewall or a static policy
+  almost all 300 attack connections succeeded (298 to 300). With the dynamic
+  firewall only 60 did, at both delays.
+- **Why 60 and not 20.** The attack ran for about 75 to 79 s and a block
+  lasts 30 s. The attacker was blocked after about 20 connections, the rule
+  expired by itself, it got another 20 through, was blocked again, and so on:
+  about three block/recover cycles of roughly 20 connections each. This shows
+  the automatic recovery (hard timeout plus flow-removed notification) working
+  repeatedly, and that the firewall keeps limiting a persistent attacker
+  instead of only blocking it once.
+- **Blocking response time: 953.7 ms at 0 ms delay and 2502.7 ms at 20 ms.**
+  Most of this is the time the attacker needs to reach the threshold (21 new
+  connections in 5 s), not the controller's processing time. The attacker
+  opens connections one after another, and each must wait for the TCP
+  handshake. At 0 ms it manages roughly 22 connections per second; at 20 ms
+  the longer round trip slows it to about 8 to 9 per second, so the threshold
+  is reached later.
+- **h1's RTT and throughput: no clear difference.** The differences between
+  setups are small and within the noise of a VM; with one run per
+  row nothing firm can be concluded. For example, throughput without any
+  attack already differs between setups at the same delay (411, 850 and 702
+  Mbit/s at 20 ms), which is as large as any change caused by the attack. The
+  RTT at 20 ms stays between 83.8 and 88.8 ms in every case. The one larger
+  jump, the dynamic firewall at 0 ms (1.85 to 6.95 ms), is still a few
+  milliseconds and could be noise or the controller being busy blocking.
+  This is expected from the design: once a connection is set up, its packets
+  match a flow rule in the switch and no longer pass through the controller,
+  so an attack on other connections barely touches h1's established traffic.
+  The benefit of the dynamic firewall therefore shows up as fewer attack
+  connections and a protected server, not as a measurable gain for h1 here.
+- **Trade-off.** The static and dynamic firewalls use one rule per connection,
+  so every new connection goes to the controller once. The no-firewall setup
+  uses MAC-based rules, which cover all connections between two hosts after
+  the first packet, so it avoids this cost. The price of seeing each
+  connection is what allows the firewall to count connections, apply the
+  policy, and block a flooding source.
+
+**Limits of the experiment.** One run per setup and delay, in a single VM
+where the attacker, switch, controller and measurements share the same CPU.
+Repeating each run several times would allow averages and a spread to be
+reported.
