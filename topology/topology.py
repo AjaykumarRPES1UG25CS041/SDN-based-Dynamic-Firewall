@@ -6,6 +6,8 @@ Run in the VM (controller must already be running on 127.0.0.1:6653):
 
 h1-h3 clients, h4 attacker, h5 app server, h6 logger,
 root namespace (controller side) 10.0.0.254/24 via an extra link to s1.
+
+The build/start/stop functions are also used by experiments/run_experiment.py.
 """
 import argparse
 import os
@@ -30,6 +32,32 @@ LOGGER_LOG = "/tmp/security_events.log"
 APP_OUT = "/tmp/app_server.out"
 
 
+def build_net(bw=None, delay=None):
+    """Create s1, h1-h6 and the root link. Returns (net, root, root_link)."""
+    # Same shaping options for every link (None means no shaping)
+    link_opts = {"bw": bw, "delay": delay}
+
+    net = Mininet(controller=None, switch=OVSSwitch, link=TCLink)
+    net.addController("c0", controller=RemoteController,
+                      ip="127.0.0.1", port=6653)
+    s1 = net.addSwitch("s1", protocols="OpenFlow13")
+
+    for i, name in enumerate(HOSTS, start=1):
+        host = net.addHost(name, ip="10.0.0.%d/24" % i,
+                           mac="00:00:00:00:00:%02x" % i)
+        net.addLink(host, s1, **link_opts)
+
+    # Node in the root namespace, linked to s1 (the controller side)
+    root = Node("root", inNamespace=False)
+    root_link = TCLink(root, s1, **link_opts)
+    return net, root, root_link
+
+
+def start_net(net, root):
+    net.start()
+    root.setIP(ROOT_IP, intf="root-eth0")
+
+
 def start_services(net):
     """Start the logger on h6 and the app server on h5 in the background."""
     h5, h6 = net.get("h5"), net.get("h6")
@@ -47,6 +75,16 @@ def start_services(net):
     return procs, files
 
 
+def stop_net(net, root_link, procs, files):
+    """Stop the services, the network and the root link."""
+    for proc in procs:
+        proc.terminate()
+    for f in files:
+        f.close()
+    net.stop()
+    root_link.delete()
+
+
 def main():
     p = argparse.ArgumentParser(description="Firewall test topology")
     p.add_argument("--bw", type=float, default=None,
@@ -58,25 +96,8 @@ def main():
     if os.geteuid() != 0:
         sys.exit("run with sudo")
 
-    # Same shaping options for every link (None means no shaping)
-    link_opts = {"bw": args.bw, "delay": args.delay}
-
-    net = Mininet(controller=None, switch=OVSSwitch, link=TCLink)
-    net.addController("c0", controller=RemoteController,
-                      ip="127.0.0.1", port=6653)
-    s1 = net.addSwitch("s1", protocols="OpenFlow13")
-
-    for i, name in enumerate(HOSTS, start=1):
-        host = net.addHost(name, ip="10.0.0.%d/24" % i,
-                           mac="00:00:00:00:00:%02x" % i)
-        net.addLink(host, s1, **link_opts)
-
-    # Node in the root namespace, linked to s1 (the controller side)
-    root = Node("root", inNamespace=False)
-    root_link = TCLink(root, s1, **link_opts)
-
-    net.start()
-    root.setIP(ROOT_IP, intf="root-eth0")
+    net, root, root_link = build_net(args.bw, args.delay)
+    start_net(net, root)
 
     procs, files = start_services(net)
     print("*** logger on h6:      output %s, events %s" % (LOGGER_OUT, LOGGER_LOG))
@@ -84,12 +105,7 @@ def main():
 
     CLI(net)
 
-    for proc in procs:
-        proc.terminate()
-    for f in files:
-        f.close()
-    net.stop()
-    root_link.delete()
+    stop_net(net, root_link, procs, files)
 
 
 if __name__ == "__main__":
