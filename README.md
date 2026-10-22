@@ -66,6 +66,10 @@ docs/                   architecture and viva notes
 The project was developed and tested on Ubuntu 22.04.5, Python 3.10.12,
 Mininet 2.3.0, Open vSwitch 2.17.12 and OS-Ken 3.1.1 (OpenFlow 1.3).
 
+No VM yet? See [docs/vm-setup.md](docs/vm-setup.md) for creating the Ubuntu VM
+in VirtualBox and connecting to it from Windows with SSH and VS Code. Then
+continue here.
+
 1. Install the system packages:
 
 ```bash
@@ -294,6 +298,8 @@ Summary of the results (details and charts in
 
 - [docs/architecture.md](docs/architecture.md): design, messages, rule
   priorities, performance evaluation
+- [docs/vm-setup.md](docs/vm-setup.md): creating the VM and connecting with
+  SSH and VS Code
 - [docs/viva-notes.md](docs/viva-notes.md): concepts, walkthroughs, design
   decisions, limitations and likely viva questions
 - [tests/README.md](tests/README.md): test cases and observed results
