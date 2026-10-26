@@ -66,6 +66,7 @@ docs/                   architecture and viva notes
 The project was developed and tested on Ubuntu 22.04.5, Python 3.10.12,
 Mininet 2.3.0, Open vSwitch 2.17.12 and OS-Ken 3.1.1 (OpenFlow 1.3).
 A fresh VM also worked with Open vSwitch 3.7.1.
+
 No VM yet? See [docs/vm-setup.md](docs/vm-setup.md) for creating the Ubuntu VM
 in VirtualBox and connecting to it from Windows with SSH and VS Code. Then
 continue here.
@@ -167,6 +168,7 @@ h3 ping -c 3 -W 1 10.0.0.6
 Expect 100% packet loss and a `DENY` event for 10.0.0.3.
 
 **4. Connection flood from h4 (dynamic block and recovery)**
+
 Run these four lines quickly, one after another. The block lasts only 30 s, so the priority=100 rule is gone if you wait too long before the last line.
 ```
 h4 python3 app/client.py --host 10.0.0.5 --attack --count 25 --timeout 0.2
@@ -201,6 +203,7 @@ AUTH_FAIL for 10.0.0.2 (count=4) to controller`, and the log shows `AUTH_FAIL`
 followed by `BLOCK` (reason `brute_force`). After about 30 seconds an
 `UNBLOCK` follows.
 On a fresh VM all 6 attempts printed ERR bad_credentials, because the block can land after the last attempt.
+
 **6. Logger crash and recovery**
 
 ```
